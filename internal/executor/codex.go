@@ -453,18 +453,12 @@ func (e *Executor) ExecuteResponsesCompactStream(ctx context.Context, account *a
 	/* 应用思考配置并获取真实模型名 */
 	body, baseModel := thinking.ApplyThinking(requestBody, model)
 
-	/* Responses API 格式已经很接近 Codex 格式，使用通用转换器处理 */
-	codexBody := translator.ConvertOpenAIRequestToCodex(baseModel, body, true)
-	codexBody, _ = sjson.SetBytes(codexBody, "model", baseModel)
-	codexBody, _ = sjson.DeleteBytes(codexBody, "stream")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "parallel_tool_calls")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "previous_response_id")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "prompt_cache_retention")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "safety_identifier")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "generate")
-	if !gjson.GetBytes(codexBody, "instructions").Exists() {
-		codexBody, _ = sjson.SetBytes(codexBody, "instructions", "")
-	}
+	/*
+	 * Compact 端点直接透传请求体，不使用通用转换器
+	 * 通用转换器会注入 stream/parallel_tool_calls/reasoning/include 等 compact 不支持的参数
+	 * 只做模型名替换和最小字段清理
+	 */
+	codexBody := cleanCompactBody(body, baseModel)
 
 	/* 构建 HTTP 请求 - 使用 /responses/compact 端点 */
 	apiURL := e.baseURL + "/responses/compact"
@@ -536,18 +530,11 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, account
 	/* 应用思考配置 */
 	body, baseModel := thinking.ApplyThinking(requestBody, model)
 
-	/* 转换请求格式 */
-	codexBody := translator.ConvertOpenAIRequestToCodex(baseModel, body, false)
-	codexBody, _ = sjson.SetBytes(codexBody, "model", baseModel)
-	codexBody, _ = sjson.DeleteBytes(codexBody, "stream")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "parallel_tool_calls")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "previous_response_id")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "prompt_cache_retention")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "safety_identifier")
-	codexBody, _ = sjson.DeleteBytes(codexBody, "generate")
-	if !gjson.GetBytes(codexBody, "instructions").Exists() {
-		codexBody, _ = sjson.SetBytes(codexBody, "instructions", "")
-	}
+	/*
+	 * Compact 端点直接透传请求体，不使用通用转换器
+	 * 只做模型名替换和最小字段清理
+	 */
+	codexBody := cleanCompactBody(body, baseModel)
 
 	/* 构建并发送请求 - 使用 /responses/compact 端点 */
 	apiURL := e.baseURL + "/responses/compact"
@@ -580,6 +567,36 @@ func (e *Executor) ExecuteResponsesCompactNonStream(ctx context.Context, account
 	}
 
 	return data, nil
+}
+
+/**
+ * cleanCompactBody 为 Compact 端点清理请求体
+ * 不使用通用转换器，直接透传原始请求体
+ * 只做模型名替换 + 删除 Compact 端点不支持的参数
+ * @param body - 原始请求体（已应用思考配置）
+ * @param baseModel - 解析后的基础模型名
+ * @returns []byte - 清理后的请求体
+ */
+func cleanCompactBody(body []byte, baseModel string) []byte {
+	result := make([]byte, len(body))
+	copy(result, body)
+
+	/* 设置正确的模型名 */
+	result, _ = sjson.SetBytes(result, "model", baseModel)
+
+	/* 删除 Compact 端点不支持的参数 */
+	result, _ = sjson.DeleteBytes(result, "stream")
+	result, _ = sjson.DeleteBytes(result, "parallel_tool_calls")
+	result, _ = sjson.DeleteBytes(result, "reasoning")
+	result, _ = sjson.DeleteBytes(result, "include")
+	result, _ = sjson.DeleteBytes(result, "previous_response_id")
+	result, _ = sjson.DeleteBytes(result, "prompt_cache_retention")
+	result, _ = sjson.DeleteBytes(result, "safety_identifier")
+	result, _ = sjson.DeleteBytes(result, "generate")
+	result, _ = sjson.DeleteBytes(result, "store")
+	result, _ = sjson.DeleteBytes(result, "reasoning_effort")
+
+	return result
 }
 
 /**
