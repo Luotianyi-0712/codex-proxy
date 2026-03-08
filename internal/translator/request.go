@@ -87,6 +87,7 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 		result, _ = sjson.DeleteBytes(result, "safety_identifier")
 		result, _ = sjson.DeleteBytes(result, "generate")
 		result, _ = sjson.DeleteBytes(result, "max_output_tokens")
+		result, _ = sjson.DeleteBytes(result, "service_tier")
 
 		return result
 	}
@@ -333,10 +334,7 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 		}
 	}
 
-	/* #1911/#1908: 保留 service_tier 字段透传（支持 fast 模式） */
-	if st := gjson.GetBytes(rawJSON, "service_tier"); st.Exists() {
-		out, _ = sjson.Set(out, "service_tier", st.Value())
-	}
+	/* service_tier 不被 Codex API 支持，不再透传 */
 
 	out, _ = sjson.Set(out, "store", false)
 	return []byte(out)
