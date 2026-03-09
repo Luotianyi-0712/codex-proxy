@@ -42,12 +42,10 @@ func (h *ProxyHandler) handleMessages(c *gin.Context) {
 
 	if stream {
 		if execErr := h.executeClaudeStream(c, rc, openaiBody, model); execErr != nil {
-			log.Errorf("Claude 流式请求失败: %v", execErr)
 			handleClaudeExecutorError(c, execErr)
 		}
 	} else {
 		if execErr := h.executeClaudeNonStream(c, rc, openaiBody, model); execErr != nil {
-			log.Errorf("Claude 非流式请求失败: %v", execErr)
 			handleClaudeExecutorError(c, execErr)
 		}
 	}

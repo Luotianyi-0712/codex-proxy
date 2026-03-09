@@ -248,13 +248,11 @@ func (h *ProxyHandler) handleChatCompletions(c *gin.Context) {
 
 	if stream {
 		if execErr := h.executor.ExecuteStream(c.Request.Context(), rc, body, model, c.Writer); execErr != nil {
-			log.Errorf("Chat Completions 流式请求失败: %v", execErr)
 			handleExecutorError(c, execErr)
 		}
 	} else {
 		result, execErr := h.executor.ExecuteNonStream(c.Request.Context(), rc, body, model)
 		if execErr != nil {
-			log.Errorf("Chat Completions 非流式请求失败: %v", execErr)
 			handleExecutorError(c, execErr)
 			return
 		}
@@ -365,13 +363,11 @@ func (h *ProxyHandler) handleResponses(c *gin.Context) {
 
 	if stream {
 		if execErr := h.executor.ExecuteResponsesStream(c.Request.Context(), rc, body, model, c.Writer); execErr != nil {
-			log.Errorf("Responses 流式请求失败: %v", execErr)
 			handleExecutorError(c, execErr)
 		}
 	} else {
 		result, execErr := h.executor.ExecuteResponsesNonStream(c.Request.Context(), rc, body, model)
 		if execErr != nil {
-			log.Errorf("Responses 非流式请求失败: %v", execErr)
 			handleExecutorError(c, execErr)
 			return
 		}
@@ -404,13 +400,11 @@ func (h *ProxyHandler) handleResponsesCompact(c *gin.Context) {
 
 	if stream {
 		if execErr := h.executor.ExecuteResponsesCompactStream(c.Request.Context(), rc, body, model, c.Writer); execErr != nil {
-			log.Errorf("Compact 流式请求失败: %v", execErr)
 			handleExecutorError(c, execErr)
 		}
 	} else {
 		result, execErr := h.executor.ExecuteResponsesCompactNonStream(c.Request.Context(), rc, body, model)
 		if execErr != nil {
-			log.Errorf("Compact 非流式请求失败: %v", execErr)
 			handleExecutorError(c, execErr)
 			return
 		}

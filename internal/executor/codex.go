@@ -205,7 +205,7 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		}
 
 		if attempt < maxAttempts-1 {
-			log.Warnf("账号 [%s] 请求失败 [%d]，切换账号重试", account.GetEmail(), httpResp.StatusCode)
+			log.Warnf("账号 [%s] [%d] 切换重试", account.GetEmail(), httpResp.StatusCode)
 			continue
 		}
 	}
@@ -661,12 +661,8 @@ func handleAccountError(account *auth.Account, statusCode int, body []byte) {
 		if cooldown > 0 {
 			account.SetQuotaCooldown(cooldown)
 		}
-		log.Debugf("账号 [%s] 请求 429，冷却 %v", account.GetEmail(), cooldown)
 	case statusCode == 403:
 		account.SetCooldown(5 * time.Minute)
-		log.Debugf("账号 [%s] 请求 403，冷却 5m", account.GetEmail())
-	default:
-		log.Warnf("账号 [%s] 请求失败 [%d]: %s", account.GetEmail(), statusCode, summarizeError(body))
 	}
 }
 

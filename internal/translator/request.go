@@ -6,6 +6,7 @@
 package translator
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -120,6 +121,9 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 				result, _ = sjson.DeleteBytes(result, "service_tier")
 			}
 		}
+
+		/* 修复 tools 中 array 类型缺少 items 的 schema 问题 */
+		result = fixToolsArraySchema(result)
 
 		/* system role → developer 转换（Codex 不接受 system role） */
 		result = convertSystemRoleToDeveloper(result)
@@ -330,7 +334,8 @@ func ConvertOpenAIRequestToCodex(modelName string, rawJSON []byte, stream bool) 
 						item, _ = sjson.Set(item, "description", v.Value())
 					}
 					if v := fn.Get("parameters"); v.Exists() {
-						item, _ = sjson.SetRaw(item, "parameters", v.Raw)
+						/* 修复 array 类型缺少 items 的 schema 问题 */
+						item, _ = sjson.SetRaw(item, "parameters", fixArraySchemaInParams(v.Raw))
 					}
 					if v := fn.Get("strict"); v.Exists() {
 						item, _ = sjson.Set(item, "strict", v.Value())
@@ -551,4 +556,116 @@ func BuildReverseToolNameMap(originalJSON []byte) map[string]string {
 		}
 	}
 	return rev
+}
+
+/**
+ * fixToolsArraySchema 遍历请求体中的 tools 数组，修复每个 function 的 parameters schema
+ * 用于 Responses API 快速路径（[]byte 格式的原始 JSON）
+ * @param rawJSON - 请求体 JSON
+ * @returns []byte - 修复后的 JSON
+ */
+func fixToolsArraySchema(rawJSON []byte) []byte {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.IsArray() {
+		return rawJSON
+	}
+	result := rawJSON
+	for i, t := range tools.Array() {
+		var paramsPath string
+		if t.Get("type").String() == "function" && t.Get("function.parameters").Exists() {
+			paramsPath = fmt.Sprintf("tools.%d.function.parameters", i)
+		} else if t.Get("parameters").Exists() {
+			paramsPath = fmt.Sprintf("tools.%d.parameters", i)
+		}
+		if paramsPath != "" {
+			raw := gjson.GetBytes(result, paramsPath).Raw
+			fixed := fixArraySchemaInParams(raw)
+			if fixed != raw {
+				result, _ = sjson.SetRawBytes(result, paramsPath, []byte(fixed))
+			}
+		}
+	}
+	return result
+}
+
+/**
+ * fixArraySchemaInParams 修复 JSON Schema 中 type=array 但缺少 items 的节点
+ * 上游 Codex API 要求所有 array 类型必须有 items 字段，否则返回 400
+ * 递归遍历 schema 的 properties/items/oneOf/anyOf/allOf 等所有嵌套层级
+ * @param raw - tool parameters 的原始 JSON
+ * @returns string - 修复后的 JSON（如果无需修复则原样返回）
+ */
+func fixArraySchemaInParams(raw string) string {
+	if raw == "" || raw == "{}" {
+		return raw
+	}
+	var schema map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		return raw
+	}
+	if fixSchemaNode(schema) {
+		if fixed, err := json.Marshal(schema); err == nil {
+			return string(fixed)
+		}
+	}
+	return raw
+}
+
+/**
+ * fixSchemaNode 递归修复单个 schema 节点
+ * @param node - schema 节点（map）
+ * @returns bool - 是否做了修复
+ */
+func fixSchemaNode(node map[string]interface{}) bool {
+	changed := false
+
+	/* 当前节点是 array 类型但缺少 items → 补上空 items */
+	if t, ok := node["type"]; ok {
+		if ts, isStr := t.(string); isStr && ts == "array" {
+			if _, hasItems := node["items"]; !hasItems {
+				node["items"] = map[string]interface{}{}
+				changed = true
+			}
+		}
+	}
+
+	/* 递归处理 properties 中的每个属性 */
+	if props, ok := node["properties"].(map[string]interface{}); ok {
+		for _, v := range props {
+			if sub, ok := v.(map[string]interface{}); ok {
+				if fixSchemaNode(sub) {
+					changed = true
+				}
+			}
+		}
+	}
+
+	/* 递归处理 items */
+	if items, ok := node["items"].(map[string]interface{}); ok {
+		if fixSchemaNode(items) {
+			changed = true
+		}
+	}
+
+	/* 递归处理 oneOf / anyOf / allOf / prefixItems */
+	for _, key := range []string{"oneOf", "anyOf", "allOf", "prefixItems"} {
+		if arr, ok := node[key].([]interface{}); ok {
+			for _, elem := range arr {
+				if sub, ok := elem.(map[string]interface{}); ok {
+					if fixSchemaNode(sub) {
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	/* 递归处理 additionalProperties（如果是 schema 对象） */
+	if ap, ok := node["additionalProperties"].(map[string]interface{}); ok {
+		if fixSchemaNode(ap) {
+			changed = true
+		}
+	}
+
+	return changed
 }
