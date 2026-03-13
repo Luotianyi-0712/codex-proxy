@@ -4,7 +4,9 @@
 package handler
 
 import (
+	"compress/gzip"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -57,4 +59,60 @@ func CORSAllowOrigin() gin.HandlerFunc {
 		c.Header("Vary", "Origin")
 		c.Next()
 	}
+}
+
+/**
+ * GzipIfAccepted 当客户端声明支持 gzip 时，启用响应压缩
+ * @returns gin.HandlerFunc - Gin 中间件函数
+ */
+func GzipIfAccepted() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method == http.MethodOptions {
+			c.Next()
+			return
+		}
+		if !clientAcceptsGzip(c.Request) {
+			c.Next()
+			return
+		}
+		if c.Writer.Header().Get("Content-Encoding") != "" {
+			c.Next()
+			return
+		}
+
+		c.Header("Content-Encoding", "gzip")
+		c.Header("Vary", "Accept-Encoding")
+
+		gz := gzip.NewWriter(c.Writer)
+		defer func() {
+			_ = gz.Close()
+		}()
+
+		c.Writer = &gzipWriter{ResponseWriter: c.Writer, Writer: gz}
+		c.Next()
+	}
+}
+
+type gzipWriter struct {
+	gin.ResponseWriter
+	Writer *gzip.Writer
+}
+
+func (w *gzipWriter) Write(data []byte) (int, error) {
+	return w.Writer.Write(data)
+}
+
+func clientAcceptsGzip(r *http.Request) bool {
+	enc := r.Header.Get("Accept-Encoding")
+	return enc != "" && strings.Contains(enc, "gzip")
+}
+
+func (w *gzipWriter) WriteHeader(statusCode int) {
+	ctype := w.Header().Get("Content-Type")
+	if strings.HasPrefix(strings.ToLower(ctype), "text/event-stream") {
+		w.Header().Del("Content-Encoding")
+		w.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
 }

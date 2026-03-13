@@ -106,6 +106,7 @@ func main() {
 	}
 	r := gin.New()
 	r.Use(handler.CORSAllowOrigin())
+	r.Use(handler.GzipIfAccepted())
 	r.Use(handler.OptionsBypass())
 	r.Use(gin.Recovery())
 	r.Use(ginLogger())
