@@ -279,6 +279,7 @@ type ClaudeStreamState struct {
 	HasStartedContent bool
 	HasText           bool
 	HasToolUse        bool
+	Completed         bool
 }
 
 /**
@@ -422,6 +423,7 @@ func ConvertCodexStreamToClaudeEvents(_ context.Context, rawLine []byte, state *
 		events = append(events, formatClaudeSSE("content_block_stop", blockStop))
 
 	case "response.completed":
+		state.Completed = true
 		/* 关闭最后一个内容块（如果还未关闭） */
 		if state.HasStartedContent {
 			blockStop := `{}`

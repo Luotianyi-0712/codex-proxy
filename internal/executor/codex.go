@@ -304,6 +304,9 @@ func (e *Executor) ExecuteStream(ctx context.Context, rc RetryConfig, requestBod
 				flusher.Flush()
 			}
 		}
+		if state.Completed {
+			break
+		}
 	}
 
 	if err = scanner.Err(); err != nil {

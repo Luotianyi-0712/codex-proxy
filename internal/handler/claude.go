@@ -95,6 +95,9 @@ func (h *ProxyHandler) executeClaudeStream(c *gin.Context, rc executor.RetryConf
 				flusher.Flush()
 			}
 		}
+		if state.Completed {
+			break
+		}
 	}
 
 	if scanErr := scanner.Err(); scanErr != nil {

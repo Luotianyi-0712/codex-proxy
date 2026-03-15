@@ -8,6 +8,7 @@ package translator
 import (
 	"bytes"
 	"context"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -37,6 +38,7 @@ type StreamState struct {
 	FunctionCallIndex    int
 	HasText              bool
 	HasToolCall          bool
+	Completed            bool
 	HasReceivedArgsDelta bool
 	HasToolCallAnnounced bool
 	baseTpl              string
@@ -123,6 +125,12 @@ func ConvertStreamChunk(_ context.Context, rawLine []byte, state *StreamState, r
 		tpl, _ = sjson.Set(tpl, "choices.0.delta.role", "assistant")
 		tpl, _ = sjson.Set(tpl, "choices.0.delta.reasoning_content", "\n\n")
 
+	case "response.reasoning.delta", "response.reasoning_text.delta":
+		if delta := root.Get("delta"); delta.Exists() && delta.String() != "" {
+			tpl, _ = sjson.Set(tpl, "choices.0.delta.role", "assistant")
+			tpl, _ = sjson.Set(tpl, "choices.0.delta.reasoning_content", delta.String())
+		}
+
 	case "response.output_text.delta":
 		if delta := root.Get("delta"); delta.Exists() {
 			if delta.String() != "" {
@@ -133,6 +141,7 @@ func ConvertStreamChunk(_ context.Context, rawLine []byte, state *StreamState, r
 		}
 
 	case "response.completed":
+		state.Completed = true
 		finishReason := "stop"
 		if state.FunctionCallIndex != -1 {
 			finishReason = "tool_calls"
@@ -230,6 +239,13 @@ func ConvertStreamChunk(_ context.Context, rawLine []byte, state *StreamState, r
 		tpl, _ = sjson.SetRaw(tpl, "choices.0.delta.tool_calls.-1", fc)
 
 	default:
+		if strings.Contains(dataType, "reasoning") && strings.HasSuffix(dataType, ".delta") {
+			if delta := root.Get("delta"); delta.Exists() && delta.String() != "" {
+				tpl, _ = sjson.Set(tpl, "choices.0.delta.role", "assistant")
+				tpl, _ = sjson.Set(tpl, "choices.0.delta.reasoning_content", delta.String())
+				return []string{tpl}
+			}
+		}
 		return nil
 	}
 
@@ -289,7 +305,8 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 	output := resp.Get("output")
 	hasOutput := false
 	if output.IsArray() {
-		var contentText, reasoningText string
+		var contentBuilder strings.Builder
+		var reasoningBuilder strings.Builder
 		var toolCalls []string
 
 		for _, item := range output.Array() {
@@ -298,17 +315,22 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 				if summary := item.Get("summary"); summary.IsArray() {
 					for _, si := range summary.Array() {
 						if si.Get("type").String() == "summary_text" {
-							reasoningText = si.Get("text").String()
-							break
+							if t := si.Get("text").String(); t != "" {
+								reasoningBuilder.WriteString(t)
+							}
 						}
 					}
+				}
+				if txt := item.Get("text").String(); txt != "" {
+					reasoningBuilder.WriteString(txt)
 				}
 			case "message":
 				if content := item.Get("content"); content.IsArray() {
 					for _, ci := range content.Array() {
 						if ci.Get("type").String() == "output_text" {
-							contentText = ci.Get("text").String()
-							break
+							if t := ci.Get("text").String(); t != "" {
+								contentBuilder.WriteString(t)
+							}
 						}
 					}
 				}
@@ -331,6 +353,8 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 			}
 		}
 
+		contentText := contentBuilder.String()
+		reasoningText := reasoningBuilder.String()
 		if contentText != "" {
 			hasOutput = true
 			tpl, _ = sjson.Set(tpl, "choices.0.message.content", contentText)

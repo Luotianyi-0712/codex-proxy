@@ -90,6 +90,9 @@ func main() {
 			cfg.HealthCheckInterval,
 			cfg.HealthCheckMaxFailures,
 			cfg.HealthCheckConcurrency,
+			cfg.HealthCheckStartDelay,
+			cfg.HealthCheckBatchSize,
+			cfg.HealthCheckReqTimeout,
 		)
 		go healthChecker.StartLoop(ctx, manager)
 	}

@@ -35,6 +35,9 @@ type Config struct {
 	HealthCheckInterval    int      `yaml:"health-check-interval"`
 	HealthCheckMaxFailures int      `yaml:"health-check-max-failures"`
 	HealthCheckConcurrency int      `yaml:"health-check-concurrency"`
+	HealthCheckStartDelay  int      `yaml:"health-check-start-delay"`
+	HealthCheckBatchSize   int      `yaml:"health-check-batch-size"`
+	HealthCheckReqTimeout  int      `yaml:"health-check-request-timeout"`
 	RefreshConcurrency     int      `yaml:"refresh-concurrency"`
 	MaxConnsPerHost        int      `yaml:"max-conns-per-host"`
 	MaxIdleConns           int      `yaml:"max-idle-conns"`
@@ -66,6 +69,9 @@ func LoadConfig(path string) (*Config, error) {
 		HealthCheckInterval:    300,
 		HealthCheckMaxFailures: 3,
 		HealthCheckConcurrency: 5,
+		HealthCheckStartDelay:  45,
+		HealthCheckBatchSize:   20,
+		HealthCheckReqTimeout:  8,
 		RefreshConcurrency:     50,
 		MaxConnsPerHost:        512,
 		MaxIdleConns:           1024,
@@ -115,6 +121,15 @@ func (c *Config) Sanitize() {
 	}
 	if c.HealthCheckConcurrency <= 0 {
 		c.HealthCheckConcurrency = 5
+	}
+	if c.HealthCheckStartDelay < 0 {
+		c.HealthCheckStartDelay = 0
+	}
+	if c.HealthCheckBatchSize < 0 {
+		c.HealthCheckBatchSize = 0
+	}
+	if c.HealthCheckReqTimeout <= 0 {
+		c.HealthCheckReqTimeout = 8
 	}
 	if c.RefreshConcurrency <= 0 {
 		c.RefreshConcurrency = 50

@@ -9,11 +9,13 @@ package auth
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -34,6 +36,10 @@ type HealthChecker struct {
 	checkInterval          time.Duration
 	maxConsecutiveFailures int
 	concurrency            int
+	startDelay             time.Duration
+	batchSize              int
+	requestTimeout         time.Duration
+	cursor                 atomic.Uint64
 }
 
 /**
@@ -45,7 +51,7 @@ type HealthChecker struct {
  * @param concurrency - 并发检查数
  * @returns *HealthChecker - 健康检查器实例
  */
-func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures int, concurrency int) *HealthChecker {
+func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures int, concurrency int, startDelaySec int, batchSize int, requestTimeoutSec int) *HealthChecker {
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -58,6 +64,16 @@ func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures i
 	if concurrency <= 0 {
 		concurrency = 5
 	}
+	if startDelaySec < 0 {
+		startDelaySec = 0
+	}
+	if batchSize < 0 {
+		batchSize = 0
+	}
+	if requestTimeoutSec <= 0 {
+		requestTimeoutSec = 8
+	}
+	requestTimeout := time.Duration(requestTimeoutSec) * time.Second
 
 	transport := &http.Transport{
 		MaxIdleConns:          concurrency * 2,
@@ -65,8 +81,9 @@ func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures i
 		MaxConnsPerHost:       concurrency * 2,
 		IdleConnTimeout:       120 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		ForceAttemptHTTP2:     true,
+		ResponseHeaderTimeout: requestTimeout,
+		ForceAttemptHTTP2:     false,
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 		DisableCompression:    true,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false},
 	}
@@ -81,12 +98,15 @@ func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures i
 	return &HealthChecker{
 		httpClient: &http.Client{
 			Transport: transport,
-			Timeout:   15 * time.Second,
+			Timeout:   requestTimeout,
 		},
 		baseURL:                strings.TrimSuffix(baseURL, "/"),
 		checkInterval:          time.Duration(checkInterval) * time.Second,
 		maxConsecutiveFailures: maxFailures,
 		concurrency:            concurrency,
+		startDelay:             time.Duration(startDelaySec) * time.Second,
+		batchSize:              batchSize,
+		requestTimeout:         requestTimeout,
 	}
 }
 
@@ -99,9 +119,19 @@ func (hc *HealthChecker) StartLoop(ctx context.Context, manager *Manager) {
 	ticker := time.NewTicker(hc.checkInterval)
 	defer ticker.Stop()
 
-	/* 启动后等待一个检查周期再开始（让刷新先完成） */
-	log.Infof("健康检查已启动，间隔 %v，并发 %d，连续失败 %d 次禁用",
-		hc.checkInterval, hc.concurrency, hc.maxConsecutiveFailures)
+	log.Infof("健康检查已启动，间隔 %v，并发 %d，批次 %d，请求超时 %v，启动延迟 %v，连续失败 %d 次禁用",
+		hc.checkInterval, hc.concurrency, hc.batchSize, hc.requestTimeout, hc.startDelay, hc.maxConsecutiveFailures)
+
+	if hc.startDelay > 0 {
+		timer := time.NewTimer(hc.startDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			log.Info("健康检查循环已停止")
+			return
+		case <-timer.C:
+		}
+	}
 
 	for {
 		select {
@@ -124,14 +154,18 @@ func (hc *HealthChecker) checkAll(ctx context.Context, manager *Manager) {
 	if len(accounts) == 0 {
 		return
 	}
+	selected := hc.pickBatch(accounts)
+	if len(selected) == 0 {
+		return
+	}
 
-	log.Debugf("开始健康检查，共 %d 个账号", len(accounts))
+	log.Debugf("开始健康检查，本轮 %d/%d 个账号", len(selected), len(accounts))
 
 	/* 使用信号量控制并发 */
 	sem := make(chan struct{}, hc.concurrency)
 	var wg sync.WaitGroup
 
-	for _, acc := range accounts {
+	for _, acc := range selected {
 		if ctx.Err() != nil {
 			break
 		}
@@ -152,10 +186,22 @@ func (hc *HealthChecker) checkAll(ctx context.Context, manager *Manager) {
 	remaining := manager.AccountCount()
 	removed := len(accounts) - remaining
 	if removed > 0 {
-		log.Warnf("健康检查完成: 移除 %d 个异常账号，剩余 %d 个", removed, remaining)
+		log.Warnf("健康检查完成: 本轮移除 %d 个异常账号，剩余 %d 个", removed, remaining)
 	} else {
-		log.Infof("健康检查完成: 全部正常，共 %d 个账号", remaining)
+		log.Infof("健康检查完成: 本轮检查 %d 个，当前共 %d 个账号", len(selected), remaining)
 	}
+}
+
+func (hc *HealthChecker) pickBatch(accounts []*Account) []*Account {
+	if hc.batchSize <= 0 || hc.batchSize >= len(accounts) {
+		return accounts
+	}
+	start := int(hc.cursor.Add(uint64(hc.batchSize))-uint64(hc.batchSize)) % len(accounts)
+	selected := make([]*Account, 0, hc.batchSize)
+	for i := 0; i < hc.batchSize; i++ {
+		selected = append(selected, accounts[(start+i)%len(accounts)])
+	}
+	return selected
 }
 
 /**
@@ -179,7 +225,7 @@ func (hc *HealthChecker) checkAccount(ctx context.Context, manager *Manager, acc
 
 	/* 使用 responses 端点发送一个最小化的探测请求 */
 	checkURL := hc.baseURL + "/responses"
-	reqBody := `{"model":"gpt-5","input":[{"role":"user","content":"hi"}],"stream":false,"store":false}`
+	reqBody := `{"model":"gpt-5","input":[{"role":"user","content":"ping"}],"stream":false,"store":false,"max_output_tokens":1,"reasoning":{"effort":"minimal"}}`
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, checkURL, strings.NewReader(reqBody))
 	if err != nil {
@@ -189,6 +235,7 @@ func (hc *HealthChecker) checkAccount(ctx context.Context, manager *Manager, acc
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Health-Check", "1")
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
@@ -220,6 +267,11 @@ func (hc *HealthChecker) checkAccount(ctx context.Context, manager *Manager, acc
 		acc.SetCooldown(5 * time.Minute)
 
 	case resp.StatusCode == 400:
+		msg := gjson.GetBytes(body, "error.message").String()
+		if strings.Contains(strings.ToLower(msg), "model") || strings.Contains(strings.ToLower(msg), "reason") {
+			log.Debugf("账号 [%s] 健康检查 400（忽略参数兼容问题）: %s", email, msg)
+			return
+		}
 
 	case resp.StatusCode == 429:
 		cooldown := parseHealthCheckRetryAfter(body)
@@ -236,7 +288,7 @@ func (hc *HealthChecker) checkAccount(ctx context.Context, manager *Manager, acc
 
 	default:
 		/* 其他错误码，仅记录日志，不删除账号 */
-		log.Warnf("账号 [%s] 健康检查异常状态码 %d", email, resp.StatusCode)
+		log.Warnf("账号 [%s] 健康检查异常状态码 %d: %s", email, resp.StatusCode, fmt.Sprintf("%.120s", string(body)))
 	}
 }
 
