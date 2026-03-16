@@ -55,14 +55,14 @@ type Manager struct {
  * @param selector - 账号选择器
  * @returns *Manager - 账号管理器实例
  */
-func NewManager(authDir, proxyURL string, refreshInterval int, selector Selector) *Manager {
+func NewManager(authDir, proxyURL string, refreshInterval int, selector Selector, enableHTTP2 bool) *Manager {
 	if selector == nil {
 		selector = NewRoundRobinSelector()
 	}
 	m := &Manager{
 		accounts:           make([]*Account, 0, 1024),
 		accountIndex:       make(map[string]*Account, 1024),
-		refresher:          NewRefresher(proxyURL),
+		refresher:          NewRefresher(proxyURL, enableHTTP2),
 		selector:           selector,
 		authDir:            authDir,
 		refreshInterval:    refreshInterval,

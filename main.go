@@ -66,7 +66,7 @@ func main() {
 
 	/* 初始化账号管理器 */
 	selector := auth.NewRoundRobinSelector()
-	manager := auth.NewManager(cfg.AuthDir, cfg.ProxyURL, cfg.RefreshInterval, selector)
+	manager := auth.NewManager(cfg.AuthDir, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2)
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)
 
 	/* 启动后台任务 */
@@ -118,6 +118,9 @@ func main() {
 			cfg.HealthCheckStartDelay,
 			cfg.HealthCheckBatchSize,
 			cfg.HealthCheckReqTimeout,
+			cfg.EnableHTTP2,
+			cfg.BackendDomain,
+			cfg.BackendResolveAddress,
 		)
 		go healthChecker.StartLoop(ctx, manager)
 	}
@@ -128,6 +131,8 @@ func main() {
 		MaxIdleConns:        cfg.MaxIdleConns,
 		MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
 		EnableHTTP2:         cfg.EnableHTTP2,
+		BackendDomain:       cfg.BackendDomain,
+		ResolveAddress:      cfg.BackendResolveAddress,
 	})
 
 	/* 启动连接池保活（防止长时间无请求后首次请求耗时过长） */
@@ -145,7 +150,7 @@ func main() {
 	r.Use(ginLogger())
 
 	/* 注册路由 */
-	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.ProxyURL, indexHTML)
+	proxyHandler := handler.NewProxyHandler(manager, exec, cfg.APIKeys, cfg.MaxRetry, cfg.ProxyURL, cfg.BaseURL, cfg.EnableHTTP2, cfg.BackendDomain, cfg.BackendResolveAddress, indexHTML)
 	proxyHandler.RegisterRoutes(r)
 
 	/* 使用 http.Server 以支持优雅关闭 */

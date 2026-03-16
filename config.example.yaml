@@ -7,8 +7,15 @@ listen: ":8080"
 # 账号文件目录（存放 JSON 格式的 Codex 账号文件）
 auth-dir: "./auths"
 
-# Codex API 基础 URL
-base-url: "https://chatgpt.com/backend-api/codex"
+# 后端域名（所有 API 统一走 https://<backend-domain>/backend-api/...）
+# 与 base-url 二选一；当 base-url 已配置时，会自动按 base-url 的主机名推导 backend-domain
+backend-domain: "chatgpt.com"
+
+# 可选：后端解析地址（支持 CNAME 或 A 记录；可写 host 或 host:port）
+# backend-resolve-address: "your-cname-or-ip"
+
+# Codex API 基础 URL（可选，配置后优先于 backend-domain）
+# base-url: "https://chatgpt.com/backend-api/codex"
 
 # HTTP/SOCKS5 代理地址（可选）
 # proxy-url: "http://127.0.0.1:7890"

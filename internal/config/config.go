@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -28,6 +29,8 @@ type Config struct {
 	Listen                 string   `yaml:"listen"`
 	AuthDir                string   `yaml:"auth-dir"`
 	ProxyURL               string   `yaml:"proxy-url"`
+	BackendDomain          string   `yaml:"backend-domain"`
+	BackendResolveAddress  string   `yaml:"backend-resolve-address"`
 	BaseURL                string   `yaml:"base-url"`
 	LogLevel               string   `yaml:"log-level"`
 	RefreshInterval        int      `yaml:"refresh-interval"`
@@ -63,7 +66,8 @@ func LoadConfig(path string) (*Config, error) {
 	cfg := &Config{
 		Listen:                 ":8080",
 		AuthDir:                "./auths",
-		BaseURL:                "https://chatgpt.com/backend-api/codex",
+		BackendDomain:          "",
+		BaseURL:                "",
 		LogLevel:               "info",
 		RefreshInterval:        3000,
 		MaxRetry:               2,
@@ -77,7 +81,7 @@ func LoadConfig(path string) (*Config, error) {
 		MaxConnsPerHost:        512,
 		MaxIdleConns:           1024,
 		MaxIdleConnsPerHost:    512,
-		EnableHTTP2:            false,
+		EnableHTTP2:            true,
 		StartupAsyncLoad:       true,
 	}
 
@@ -97,6 +101,8 @@ func (c *Config) Sanitize() {
 	c.Listen = strings.TrimSpace(c.Listen)
 	c.AuthDir = strings.TrimSpace(c.AuthDir)
 	c.ProxyURL = strings.TrimSpace(c.ProxyURL)
+	c.BackendDomain = strings.TrimSpace(c.BackendDomain)
+	c.BackendResolveAddress = strings.TrimSpace(c.BackendResolveAddress)
 	c.BaseURL = strings.TrimSpace(c.BaseURL)
 	c.LogLevel = strings.TrimSpace(strings.ToLower(c.LogLevel))
 
@@ -106,8 +112,20 @@ func (c *Config) Sanitize() {
 	if c.AuthDir == "" {
 		c.AuthDir = "./auths"
 	}
-	if c.BaseURL == "" {
-		c.BaseURL = "https://chatgpt.com/backend-api/codex"
+	/* 优先级：base-url（若配置） > backend-domain（自动拼接） */
+	if c.BaseURL != "" {
+		if !strings.HasPrefix(strings.ToLower(c.BaseURL), "http://") && !strings.HasPrefix(strings.ToLower(c.BaseURL), "https://") {
+			c.BaseURL = "https://" + c.BaseURL
+		}
+		if u, err := url.Parse(c.BaseURL); err == nil && u.Hostname() != "" {
+			/* 与请求主机保持一致，避免解析地址映射目标与 URL 主机不一致 */
+			c.BackendDomain = u.Hostname()
+		}
+	} else {
+		if c.BackendDomain == "" {
+			c.BackendDomain = "chatgpt.com"
+		}
+		c.BaseURL = "https://" + c.BackendDomain + "/backend-api/codex"
 	}
 	if c.RefreshInterval <= 0 {
 		c.RefreshInterval = 3000

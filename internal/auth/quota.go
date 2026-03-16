@@ -10,11 +10,15 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"codex-proxy/internal/netutil"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -28,6 +32,7 @@ import (
 type QuotaChecker struct {
 	httpClient  *http.Client
 	concurrency int
+	usageURL    string
 }
 
 /**
@@ -52,21 +57,39 @@ type QuotaCheckResult struct {
  * @param concurrency - 并发查询数
  * @returns *QuotaChecker - 额度查询器实例
  */
-func NewQuotaChecker(proxyURL string, concurrency int) *QuotaChecker {
+func NewQuotaChecker(baseURL, proxyURL string, concurrency int, enableHTTP2 bool, backendDomain, resolveAddress string) *QuotaChecker {
 	if concurrency <= 0 {
 		concurrency = 50
 	}
+	if backendDomain == "" {
+		backendDomain = "chatgpt.com"
+	}
+	usageURL := "https://" + backendDomain + "/backend-api/wham/usage"
+	if baseURL != "" {
+		if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+			usageURL = u.Scheme + "://" + u.Host + "/backend-api/wham/usage"
+		}
+	}
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 60 * time.Second}
+	dialCtx := netutil.BuildResolveDialContext(dialer, backendDomain, resolveAddress)
+	log.Debugf("quota checker dial config backend_domain=%s resolve_address=%s usage_url=%s", backendDomain, netutil.NormalizeResolveAddress(resolveAddress), usageURL)
 
 	transport := &http.Transport{
+		DialContext:           dialCtx,
 		MaxIdleConns:          concurrency * 2,
 		MaxIdleConnsPerHost:   concurrency * 2,
 		MaxConnsPerHost:       concurrency * 2,
 		IdleConnTimeout:       120 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2:     enableHTTP2,
 		DisableCompression:    true,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false},
+	}
+	if !enableHTTP2 {
+		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
 
 	if proxyURL != "" {
@@ -82,6 +105,7 @@ func NewQuotaChecker(proxyURL string, concurrency int) *QuotaChecker {
 			Timeout:   20 * time.Second,
 		},
 		concurrency: concurrency,
+		usageURL:    strings.TrimSpace(usageURL),
 	}
 }
 
@@ -200,8 +224,7 @@ func (qc *QuotaChecker) checkAccount(ctx context.Context, acc *Account) int {
 		return -1
 	}
 
-	usageURL := "https://chatgpt.com/backend-api/wham/usage"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, qc.usageURL, nil)
 	if err != nil {
 		return 0
 	}
@@ -209,6 +232,8 @@ func (qc *QuotaChecker) checkAccount(ctx context.Context, acc *Account) int {
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}

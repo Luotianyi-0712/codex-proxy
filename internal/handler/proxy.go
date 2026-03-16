@@ -59,7 +59,7 @@ type ProxyHandler struct {
  * @param maxRetry - 最大重试次数（0 表示不重试）
  * @returns *ProxyHandler - 代理处理器实例
  */
-func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []string, maxRetry int, proxyURL string, indexHTML []byte) *ProxyHandler {
+func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []string, maxRetry int, proxyURL string, baseURL string, enableHTTP2 bool, backendDomain string, backendResolveAddress string, indexHTML []byte) *ProxyHandler {
 	if maxRetry < 0 {
 		maxRetry = 0
 	}
@@ -68,7 +68,7 @@ func NewProxyHandler(manager *auth.Manager, exec *executor.Executor, apiKeys []s
 		executor:     exec,
 		apiKeys:      apiKeys,
 		maxRetry:     maxRetry,
-		quotaChecker: auth.NewQuotaChecker(proxyURL, 50),
+		quotaChecker: auth.NewQuotaChecker(baseURL, proxyURL, 50, enableHTTP2, backendDomain, backendResolveAddress),
 		indexHTML:    indexHTML,
 	}
 }
@@ -124,11 +124,35 @@ func (h *ProxyHandler) authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		authHeader := c.GetHeader("Authorization")
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		token = strings.TrimSpace(token)
+		token := ""
+		tokenSource := "none"
+
+		/* 兼容 OpenAI 风格：Authorization: Bearer <key>（大小写不敏感） */
+		authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+		if authHeader != "" {
+			parts := strings.Fields(authHeader)
+			if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+				token = strings.TrimSpace(parts[1])
+				tokenSource = "authorization_bearer"
+			}
+		}
+
+		/* 兼容 Claude 客户端常见头：x-api-key / api-key */
+		if token == "" {
+			token = strings.TrimSpace(c.GetHeader("x-api-key"))
+			if token != "" {
+				tokenSource = "x-api-key"
+			}
+		}
+		if token == "" {
+			token = strings.TrimSpace(c.GetHeader("api-key"))
+			if token != "" {
+				tokenSource = "api-key"
+			}
+		}
 
 		if _, ok := keySet[token]; !ok {
+			log.Debugf("鉴权失败: path=%s source=%s auth_present=%v x_api_key_present=%v api_key_present=%v token_len=%d", c.Request.URL.Path, tokenSource, authHeader != "", c.GetHeader("x-api-key") != "", c.GetHeader("api-key") != "", len(token))
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": gin.H{
 					"message": "无效的 API Key",
@@ -139,6 +163,7 @@ func (h *ProxyHandler) authMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		log.Debugf("鉴权成功: path=%s source=%s token_len=%d", c.Request.URL.Path, tokenSource, len(token))
 		c.Next()
 	}
 }

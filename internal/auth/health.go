@@ -11,12 +11,15 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"codex-proxy/internal/netutil"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -51,9 +54,17 @@ type HealthChecker struct {
  * @param concurrency - 并发检查数
  * @returns *HealthChecker - 健康检查器实例
  */
-func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures int, concurrency int, startDelaySec int, batchSize int, requestTimeoutSec int) *HealthChecker {
+func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures int, concurrency int, startDelaySec int, batchSize int, requestTimeoutSec int, enableHTTP2 bool, backendDomain string, resolveAddress string) *HealthChecker {
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+	if backendDomain == "" {
+		if u, err := url.Parse(baseURL); err == nil {
+			backendDomain = u.Hostname()
+		}
+	}
+	if backendDomain == "" {
+		backendDomain = "chatgpt.com"
 	}
 	if checkInterval <= 0 {
 		checkInterval = 300
@@ -75,17 +86,24 @@ func NewHealthChecker(baseURL, proxyURL string, checkInterval int, maxFailures i
 	}
 	requestTimeout := time.Duration(requestTimeoutSec) * time.Second
 
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 60 * time.Second}
+	dialCtx := netutil.BuildResolveDialContext(dialer, backendDomain, resolveAddress)
+	log.Debugf("health checker dial config backend_domain=%s resolve_address=%s base_url=%s", backendDomain, netutil.NormalizeResolveAddress(resolveAddress), baseURL)
 	transport := &http.Transport{
+		DialContext:           dialCtx,
 		MaxIdleConns:          concurrency * 2,
 		MaxIdleConnsPerHost:   concurrency * 2,
 		MaxConnsPerHost:       concurrency * 2,
 		IdleConnTimeout:       120 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: requestTimeout,
-		ForceAttemptHTTP2:     false,
-		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		ForceAttemptHTTP2:     enableHTTP2,
 		DisableCompression:    true,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false, NextProtos: []string{"http/1.1"}},
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false},
+	}
+	if !enableHTTP2 {
+		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
 
 	if proxyURL != "" {
@@ -235,6 +253,8 @@ func (hc *HealthChecker) checkAccount(ctx context.Context, manager *Manager, acc
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
 	req.Header.Set("X-Health-Check", "1")
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)

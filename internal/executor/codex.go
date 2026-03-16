@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"codex-proxy/internal/auth"
+	"codex-proxy/internal/netutil"
 	"codex-proxy/internal/thinking"
 	"codex-proxy/internal/translator"
 
@@ -49,6 +50,8 @@ type HTTPPoolConfig struct {
 	MaxIdleConnsPerHost int
 	MaxConnsPerHost     int
 	EnableHTTP2         bool
+	BackendDomain       string
+	ResolveAddress      string
 }
 
 /**
@@ -61,6 +64,7 @@ type Executor struct {
 	baseURL       string
 	httpClient    *http.Client
 	keepAliveOnce sync.Once
+	resolveAddr   string
 }
 
 /**
@@ -92,8 +96,9 @@ func NewExecutor(baseURL, proxyURL string, poolCfg HTTPPoolConfig) *Executor {
 		KeepAlive: 60 * time.Second,
 	}
 
+	dialCtx := netutil.BuildResolveDialContext(dialer, poolCfg.BackendDomain, poolCfg.ResolveAddress)
 	transport := &http.Transport{
-		DialContext:           dialer.DialContext,
+		DialContext:           dialCtx,
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		MaxConnsPerHost:       maxConnsPerHost,
@@ -125,6 +130,7 @@ func NewExecutor(baseURL, proxyURL string, poolCfg HTTPPoolConfig) *Executor {
 			Transport: transport,
 			Timeout:   5 * time.Minute,
 		},
+		resolveAddr: strings.TrimSpace(poolCfg.ResolveAddress),
 	}
 }
 
@@ -207,6 +213,8 @@ func (e *Executor) sendWithRetry(ctx context.Context, rc RetryConfig, model stri
 		}
 		applyCodexHeaders(httpReq, account, stream)
 		buildDur := time.Since(buildStart)
+		dialTarget := effectiveDialTarget(httpReq.URL, e.resolveAddr)
+		log.Infof("upstream request model=%s stream=%v account=%s attempt=%d/%d method=%s url=%s dial_target=%s", model, stream, account.GetEmail(), attempt+1, maxAttempts, httpReq.Method, httpReq.URL.String(), dialTarget)
 
 		doStart := time.Now()
 		httpResp, err := e.httpClient.Do(httpReq)
@@ -799,6 +807,8 @@ func applyCodexHeaders(r *http.Request, account *auth.Account, stream bool) {
 	r.Header.Set("Version", codexClientVersion)
 	r.Header.Set("Session_id", uuid.NewString())
 	r.Header.Set("User-Agent", codexUserAgent)
+	r.Header.Set("Origin", "https://chatgpt.com")
+	r.Header.Set("Referer", "https://chatgpt.com/")
 	r.Header.Set("Originator", "codex_cli_rs")
 	r.Header.Set("Connection", "Keep-Alive")
 
@@ -847,6 +857,33 @@ type StatusError struct {
 
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("Codex API 错误 [%d]: %s", e.Code, summarizeError(e.Body))
+}
+
+func effectiveDialTarget(u *url.URL, resolveAddr string) string {
+	if u == nil {
+		return ""
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "http") {
+			port = "80"
+		} else {
+			port = "443"
+		}
+	}
+
+	resolveAddr = netutil.NormalizeResolveAddress(resolveAddr)
+	if resolveAddr != "" {
+		if _, _, err := net.SplitHostPort(resolveAddr); err == nil {
+			return resolveAddr
+		}
+		return net.JoinHostPort(resolveAddr, port)
+	}
+	if host == "" {
+		return u.Host
+	}
+	return net.JoinHostPort(host, port)
 }
 
 /**

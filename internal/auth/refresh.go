@@ -69,7 +69,7 @@ type Refresher struct {
  * @param proxyURL - 可选的代理地址，为空则直连
  * @returns *Refresher - 刷新器实例
  */
-func NewRefresher(proxyURL string) *Refresher {
+func NewRefresher(proxyURL string, enableHTTP2 bool) *Refresher {
 	transport := &http.Transport{
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   200, /* auth.openai.com 单主机，需要大连接池 */
@@ -79,9 +79,13 @@ func NewRefresher(proxyURL string) *Refresher {
 		ResponseHeaderTimeout: 20 * time.Second,
 		WriteBufferSize:       4 * 1024,
 		ReadBufferSize:        8 * 1024,
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2:     enableHTTP2,
 		DisableCompression:    true,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: false},
+	}
+	if !enableHTTP2 {
+		transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
 
 	if proxyURL != "" {
