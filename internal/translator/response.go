@@ -380,12 +380,18 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 		}
 	}
 
-	/* 处理 output 数组 */
+	/* 处理 output 数组；先收集顶层 reasoning 相关字段（部分上游放在 response 下） */
+	var reasoningBuilder strings.Builder
+	if t := resp.Get("reasoning_summary.text").String(); t != "" {
+		reasoningBuilder.WriteString(t)
+	}
+	if t := resp.Get("reasoning_summary").String(); t != "" && reasoningBuilder.Len() == 0 {
+		reasoningBuilder.WriteString(t)
+	}
 	output := resp.Get("output")
 	hasOutput := false
 	if output.IsArray() {
 		var contentBuilder strings.Builder
-		var reasoningBuilder strings.Builder
 		var toolCalls []string
 
 		for _, item := range output.Array() {
@@ -403,7 +409,8 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 				/* Responses API：正文思维链在 content[] 的 reasoning_text 中（与 CLIProxy / 官方文档一致） */
 				if content := item.Get("content"); content.IsArray() {
 					for _, ci := range content.Array() {
-						if ci.Get("type").String() == "reasoning_text" {
+						ct := ci.Get("type").String()
+						if ct == "reasoning_text" || ct == "text" {
 							if t := ci.Get("text").String(); t != "" {
 								reasoningBuilder.WriteString(t)
 							}
@@ -412,6 +419,24 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 				}
 				if txt := item.Get("text").String(); txt != "" {
 					reasoningBuilder.WriteString(txt)
+				}
+			case "reasoning_text":
+				if t := item.Get("text").String(); t != "" {
+					reasoningBuilder.WriteString(t)
+				}
+				if content := item.Get("content"); content.IsArray() {
+					for _, ci := range content.Array() {
+						if t := ci.Get("text").String(); t != "" {
+							reasoningBuilder.WriteString(t)
+						}
+					}
+				}
+			case "content_part":
+				part := item.Get("part")
+				if part.Get("type").String() == "reasoning_text" {
+					if t := part.Get("text").String(); t != "" {
+						reasoningBuilder.WriteString(t)
+					}
 				}
 			case "message":
 				if content := item.Get("content"); content.IsArray() {
@@ -449,6 +474,7 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 			tpl, _ = sjson.Set(tpl, "choices.0.message.content", contentText)
 		}
 		if reasoningText != "" {
+			hasOutput = true
 			tpl, _ = sjson.Set(tpl, "choices.0.message.reasoning_content", reasoningText)
 		}
 		if len(toolCalls) > 0 {
@@ -458,6 +484,11 @@ func ConvertNonStreamResponse(_ context.Context, rawJSON []byte, reverseToolMap 
 				tpl, _ = sjson.SetRaw(tpl, "choices.0.message.tool_calls.-1", tc)
 			}
 		}
+	}
+	/* 仅有顶层 reasoning（无 output 数组或 output 为空）时也写入 reasoning_content */
+	if reasoningBuilder.Len() > 0 && gjson.Get(tpl, "choices.0.message.reasoning_content").String() == "" {
+		tpl, _ = sjson.Set(tpl, "choices.0.message.reasoning_content", reasoningBuilder.String())
+		hasOutput = true
 	}
 
 	/* finish_reason */
