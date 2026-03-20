@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,6 +58,8 @@ type Manager struct {
 	refresher               *Refresher
 	selector                Selector
 	authDir                 string
+	db                      *sql.DB
+	saveTokenStmt           *sql.Stmt
 	refreshInterval         int
 	refreshConcurrency      int
 	scanIntervalSec         int
@@ -78,11 +81,12 @@ type Manager struct {
  * @param opts - 可选配置，nil 时使用默认值
  * @returns *Manager - 账号管理器实例
  */
-func NewManager(authDir, proxyURL string, refreshInterval int, selector Selector, enableHTTP2 bool, opts *ManagerOptions) *Manager {
+func NewManager(authDir string, db *sql.DB, proxyURL string, refreshInterval int, selector Selector, enableHTTP2 bool, opts *ManagerOptions) *Manager {
 	if selector == nil {
 		selector = NewRoundRobinSelector()
 	}
 	m := &Manager{
+		db:                      db,
 		accounts:                make([]*Account, 0, 1024),
 		accountIndex:            make(map[string]*Account, 1024),
 		refresher:               NewRefresher(proxyURL, enableHTTP2),
@@ -120,7 +124,69 @@ func NewManager(authDir, proxyURL string, refreshInterval int, selector Selector
 	}
 	empty := make([]*Account, 0)
 	m.accountsPtr.Store(&empty)
+
+	if m.db != nil {
+		if err := m.prepareDBStatements(); err != nil {
+			log.Fatalf("准备数据库语句失败: %v", err)
+		}
+	}
+
 	return m
+}
+
+/**
+ * SetupDB 初始化数据库表结构
+ */
+func SetupDB(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS codex_accounts (
+	id SERIAL PRIMARY KEY,
+	account_id TEXT UNIQUE,
+	email TEXT UNIQUE,
+	id_token TEXT,
+	access_token TEXT,
+	refresh_token TEXT,
+	expire TEXT,
+	plan_type TEXT,
+	last_refresh TIMESTAMPTZ,
+	updated_at TIMESTAMPTZ DEFAULT NOW()
+)
+`)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_codex_accounts_updated_at ON codex_accounts(updated_at)`)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_codex_accounts_refresh_token ON codex_accounts(refresh_token)`)
+	return err
+}
+
+func (m *Manager) prepareDBStatements() error {
+	if m.db == nil {
+		return nil
+	}
+	stmt, err := m.db.Prepare(`
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+ON CONFLICT (email) DO UPDATE SET
+	id_token = EXCLUDED.id_token,
+	access_token = EXCLUDED.access_token,
+	refresh_token = EXCLUDED.refresh_token,
+	expire = EXCLUDED.expire,
+	plan_type = EXCLUDED.plan_type,
+	last_refresh = EXCLUDED.last_refresh,
+	updated_at = NOW()
+`)
+	if err != nil {
+		return err
+	}
+	m.saveTokenStmt = stmt
+	return nil
 }
 
 /**
@@ -140,6 +206,26 @@ func (m *Manager) SetRefreshConcurrency(n int) {
 func (m *Manager) LoadAccounts() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.db != nil {
+		if err := m.loadAccountsFromDB(); err != nil {
+			return fmt.Errorf("加载数据库账号失败: %w", err)
+		}
+		if len(m.accounts) == 0 && m.authDir != "" {
+			if err := m.importAccountsFromFilesToDB(); err != nil {
+				log.Warnf("从磁盘迁移账号到数据库失败: %v", err)
+			}
+			if err := m.loadAccountsFromDB(); err != nil {
+				return fmt.Errorf("加载数据库账号失败: %w", err)
+			}
+		}
+		if len(m.accounts) == 0 {
+			return fmt.Errorf("数据库中未找到有效账号")
+		}
+		m.publishSnapshot()
+		log.Infof("共加载 %d 个 Codex 账号（PostgreSQL）", len(m.accounts))
+		return nil
+	}
 
 	entries, err := os.ReadDir(m.authDir)
 	if err != nil {
@@ -268,6 +354,168 @@ func loadAccountFromFile(filePath string) (*Account, error) {
 	}, nil
 }
 
+func (m *Manager) loadAccountsFromDB() error {
+	if m.db == nil {
+		return nil
+	}
+
+	rows, err := m.db.Query(`SELECT account_id,email,id_token,access_token,refresh_token,expire,plan_type FROM codex_accounts`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	accounts := make([]*Account, 0)
+	index := make(map[string]*Account)
+
+	for rows.Next() {
+		var accountID, email, idToken, accessToken, refreshToken, expire, planType sql.NullString
+		if err := rows.Scan(&accountID, &email, &idToken, &accessToken, &refreshToken, &expire, &planType); err != nil {
+			log.Warnf("读取数据库账号失败: %v", err)
+			continue
+		}
+		if refreshToken.String == "" {
+			continue
+		}
+		key := "db:" + accountID.String
+		if accountID.String == "" {
+			key = "db:" + email.String
+		}
+		if key == "db:" {
+			key = fmt.Sprintf("db:%d", len(accounts)+1)
+		}
+
+		acc := &Account{
+			FilePath: key,
+			Token: TokenData{
+				IDToken:      idToken.String,
+				AccessToken:  accessToken.String,
+				RefreshToken: refreshToken.String,
+				AccountID:    accountID.String,
+				Email:        email.String,
+				Expire:       expire.String,
+				PlanType:     planType.String,
+			},
+			Status: StatusActive,
+		}
+
+		accounts = append(accounts, acc)
+		index[key] = acc
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	m.accounts = accounts
+	m.accountIndex = index
+	return nil
+}
+
+func (m *Manager) importAccountsFromFilesToDB() error {
+	if m.db == nil {
+		return nil
+	}
+
+	entries, err := os.ReadDir(m.authDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		filePath := filepath.Join(m.authDir, entry.Name())
+		acc, loadErr := loadAccountFromFile(filePath)
+		if loadErr != nil {
+			log.Warnf("导入账号文件失败 [%s]: %v", entry.Name(), loadErr)
+			continue
+		}
+
+		exists, err := m.accountExists(acc)
+		if err != nil {
+			log.Warnf("检查账号是否存在失败 [%s]: %v", acc.GetEmail(), err)
+			continue
+		}
+		if exists {
+			log.Infof("账号已存在，跳过导入: %s", acc.GetEmail())
+			// 同样清理原文件，避免重复导入
+			if err := os.Remove(filePath); err != nil {
+				log.Warnf("删除重复 JSON账号文件失败 [%s]: %v", filePath, err)
+			}
+			continue
+		}
+
+		if err := m.saveTokenToDB(acc); err != nil {
+			log.Warnf("导入账号到 DB 失败 [%s]: %v", acc.GetEmail(), err)
+			continue
+		}
+		// 成功写入数据库后删除本地 JSON 文件
+		if err := os.Remove(filePath); err != nil {
+			log.Warnf("删除已导入 JSON账号文件失败 [%s]: %v", filePath, err)
+		} else {
+			log.Infof("已删除已导入 JSON账号文件: %s", filePath)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) saveTokenToDB(acc *Account) error {
+	if m.db == nil {
+		return nil
+	}
+
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+
+	if m.saveTokenStmt != nil {
+		_, err := m.saveTokenStmt.Exec(acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, time.Now())
+		return err
+	}
+
+	_, err := m.db.Exec(`
+INSERT INTO codex_accounts (account_id,email,id_token,access_token,refresh_token,expire,plan_type,last_refresh,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+ON CONFLICT (email) DO UPDATE SET
+	id_token = EXCLUDED.id_token,
+	access_token = EXCLUDED.access_token,
+	refresh_token = EXCLUDED.refresh_token,
+	expire = EXCLUDED.expire,
+	plan_type = EXCLUDED.plan_type,
+	last_refresh = EXCLUDED.last_refresh,
+	updated_at = NOW()
+`, acc.Token.AccountID, acc.Token.Email, acc.Token.IDToken, acc.Token.AccessToken, acc.Token.RefreshToken, acc.Token.Expire, acc.Token.PlanType, time.Now())
+
+	return err
+}
+
+func (m *Manager) accountExists(acc *Account) (bool, error) {
+	if m.db == nil {
+		return false, nil
+	}
+
+	var count int
+	if err := m.db.QueryRow(`SELECT COUNT(1) FROM codex_accounts WHERE email=$1 OR account_id=$2`, acc.GetEmail(), acc.GetAccountID()).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (m *Manager) deleteAccountFromDB(acc *Account) error {
+	if m.db == nil {
+		return nil
+	}
+
+	result, err := m.db.Exec(`DELETE FROM codex_accounts WHERE email=$1 OR account_id=$2`, acc.GetEmail(), acc.GetAccountID())
+	if err != nil {
+		return err
+	}
+	_, _ = result.RowsAffected()
+	// 重复删除也视为成功
+	return nil
+}
+
 /**
  * Pick 选择下一个可用账号（委托给选择器）
  * @param model - 请求的模型名称
@@ -362,11 +610,19 @@ func (m *Manager) RemoveAccount(acc *Account, reason string) {
 	m.publishSnapshot()
 	m.mu.Unlock()
 
-	/* 删除磁盘文件 */
-	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-		log.Errorf("账号 [%s] 磁盘文件删除失败: %v", email, err)
+	/* 删除持久化存储 */
+	if m.db != nil {
+		if err := m.deleteAccountFromDB(acc); err != nil {
+			log.Errorf("账号 [%s] 数据库删除失败: %v", email, err)
+		} else {
+			log.Warnf("账号 [%s] 已删除（内存+数据库），原因: %s，剩余 %d 个", email, reason, remaining)
+		}
 	} else {
-		log.Warnf("账号 [%s] 已删除（内存+磁盘），原因: %s，剩余 %d 个", email, reason, remaining)
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			log.Errorf("账号 [%s] 磁盘文件删除失败: %v", email, err)
+		} else {
+			log.Warnf("账号 [%s] 已删除（内存+磁盘），原因: %s，剩余 %d 个", email, reason, remaining)
+		}
 	}
 }
 
@@ -481,6 +737,9 @@ func (m *Manager) enqueueSave(acc *Account) {
  * 已存在的文件不会重复加载，已被移除的也不会重新加入（直到文件变更）
  */
 func (m *Manager) scanNewFiles() {
+	if m.db != nil {
+		return
+	}
 	entries, err := os.ReadDir(m.authDir)
 	if err != nil {
 		log.Warnf("扫描账号目录失败: %v", err)
@@ -928,6 +1187,9 @@ func (m *Manager) refreshAccount(ctx context.Context, acc *Account) {
  * @returns error - 保存失败时返回错误（原文件不受影响）
  */
 func (m *Manager) saveTokenToFile(acc *Account) error {
+	if m.db != nil {
+		return m.saveTokenToDB(acc)
+	}
 	acc.mu.RLock()
 	tf := TokenFile{
 		IDToken:      acc.Token.IDToken,

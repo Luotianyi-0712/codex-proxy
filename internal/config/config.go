@@ -28,6 +28,15 @@ import (
 type Config struct {
 	Listen                   string   `yaml:"listen"`
 	AuthDir                  string   `yaml:"auth-dir"`
+	DBEnabled                bool     `yaml:"db-enabled"`
+	DBDriver                 string   `yaml:"db-driver"`
+	DBHost                   string   `yaml:"db-host"`
+	DBPort                   int      `yaml:"db-port"`
+	DBUser                   string   `yaml:"db-user"`
+	DBPassword               string   `yaml:"db-password"`
+	DBName                   string   `yaml:"db-name"`
+	DBSSLMode                string   `yaml:"db-sslmode"`
+	DBDSN                    string   `yaml:"db-dsn"`
 	ProxyURL                 string   `yaml:"proxy-url"`
 	BackendDomain            string   `yaml:"backend-domain"`
 	BackendResolveAddress    string   `yaml:"backend-resolve-address"`
@@ -89,6 +98,15 @@ func LoadConfig(path string) (*Config, error) {
 	cfg := &Config{
 		Listen:                     ":8080",
 		AuthDir:                    "./auths",
+		DBEnabled:                  false,
+		DBDriver:                   "postgres",
+		DBHost:                     "127.0.0.1",
+		DBPort:                     5432,
+		DBUser:                     "",
+		DBPassword:                 "",
+		DBName:                     "codex_proxy",
+		DBSSLMode:                  "disable",
+		DBDSN:                      "",
 		BackendDomain:              "",
 		BaseURL:                    "",
 		LogLevel:                   "info",
@@ -101,7 +119,7 @@ func LoadConfig(path string) (*Config, error) {
 		HealthCheckBatchSize:       20,
 		HealthCheckReqTimeout:      8,
 		RefreshConcurrency:         50,
-		MaxConnsPerHost:            20,  /* HTTP/2 下过高易触发上游 GOAWAY ENHANCE_YOUR_CALM */
+		MaxConnsPerHost:            20, /* HTTP/2 下过高易触发上游 GOAWAY ENHANCE_YOUR_CALM */
 		MaxIdleConns:               50,
 		MaxIdleConnsPerHost:        10,
 		EnableHTTP2:                true,
@@ -155,6 +173,15 @@ func (c *Config) Sanitize() {
 	}
 	if c.AuthDir == "" {
 		c.AuthDir = "./auths"
+	}
+	if c.DBDriver == "" {
+		c.DBDriver = "postgres"
+	}
+	if c.DBPort == 0 {
+		c.DBPort = 5432
+	}
+	if c.DBSSLMode == "" {
+		c.DBSSLMode = "disable"
 	}
 	/* 优先级：base-url（若配置） > backend-domain（自动拼接） */
 	if c.BaseURL != "" {

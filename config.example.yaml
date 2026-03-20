@@ -4,8 +4,19 @@
 # 监听地址
 listen: ":8080"
 
-# 账号文件目录（存放 JSON 格式的 Codex 账号文件）
+# 账号文件目录（存放 JSON 格式的 Codex 账号文件，DB 模式时可留空）
 auth-dir: "./auths"
+
+# 使用 PostgreSQL 存储账号
+# db-enabled: true
+# db-driver: postgres
+# db-host: 127.0.0.1
+# db-port: 5432
+# db-user: username
+# db-password: password
+# db-name: codex_proxy
+# db-sslmode: disable
+# db-dsn: ""  # 若配置则优先使用 DSN
 
 # 后端域名（所有 API 统一走 https://<backend-domain>/backend-api/...）
 # 与 base-url 二选一；当 base-url 已配置时，会自动按 base-url 的主机名推导 backend-domain

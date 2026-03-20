@@ -7,11 +7,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,6 +25,7 @@ import (
 	"codex-proxy/internal/static"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -39,6 +43,75 @@ const (
 	colorWhite  = "\033[97m"
 )
 
+func openOrCreatePostgres(cfg *config.Config) (*sql.DB, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+
+	targetName := strings.TrimSpace(cfg.DBName)
+	if targetName == "" {
+		targetName = "codex_proxy"
+	}
+
+	dsn := strings.TrimSpace(cfg.DBDSN)
+	if dsn == "" {
+		dsn = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
+			cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, targetName, cfg.DBSSLMode)
+	}
+
+	openDB := func(uri string) (*sql.DB, error) {
+		db, err := sql.Open(cfg.DBDriver, uri)
+		if err != nil {
+			return nil, err
+		}
+		if err = db.Ping(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return db, nil
+	}
+
+	db, err := openDB(dsn)
+	if err == nil {
+		return db, nil
+	}
+
+	if !strings.Contains(err.Error(), "does not exist") && !strings.Contains(err.Error(), "不存在") {
+		return nil, err
+	}
+
+	// 尝试自动创建数据库
+	adminDSN := dsn
+	if cfg.DBDSN == "" {
+		adminDSN = fmt.Sprintf("postgres://%s:%s@%s:%d/postgres?sslmode=%s",
+			cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBSSLMode)
+	} else {
+		parsed, parseErr := url.Parse(cfg.DBDSN)
+		if parseErr == nil {
+			parsed.Path = "/postgres"
+			adminDSN = parsed.String()
+		}
+	}
+
+	adminDB, err := openDB(adminDSN)
+	if err != nil {
+		return nil, fmt.Errorf("admin DB 连接失败: %w", err)
+	}
+	defer adminDB.Close()
+
+	_, err = adminDB.Exec(fmt.Sprintf("CREATE DATABASE %s", pqQuote(targetName)))
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		return nil, fmt.Errorf("创建数据库失败: %w", err)
+	}
+
+	// 重连目标数据库
+	return openDB(dsn)
+}
+
+func pqQuote(identifier string) string {
+	identifier = strings.ReplaceAll(identifier, "\"", "\\\"")
+	return "\"" + identifier + "\""
+}
 func main() {
 	/* 配置 logrus 彩色日志格式 */
 	log.SetFormatter(&log.TextFormatter{
@@ -67,6 +140,20 @@ func main() {
 			cfg.HealthCheckInterval, cfg.HealthCheckConcurrency, cfg.HealthCheckMaxFailures)
 	}
 
+	/* 数据库连接（可选） */
+	var db *sql.DB
+	if cfg.DBEnabled {
+		db, err = openOrCreatePostgres(cfg)
+		if err != nil {
+			log.Fatalf("数据库无法就绪: %v", err)
+		}
+		log.Infof("已连接数据库")
+
+		if err = auth.SetupDB(db); err != nil {
+			log.Fatalf("数据库初始化失败: %v", err)
+		}
+	}
+
 	/* 初始化账号管理器 */
 	var selector auth.Selector
 	if cfg.Selector == "quota-first" {
@@ -82,7 +169,7 @@ func main() {
 		RefreshSingleTimeoutSec: cfg.RefreshSingleTimeoutSec,
 		RefreshBatchSize:        cfg.RefreshBatchSize,
 	}
-	manager := auth.NewManager(cfg.AuthDir, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2, managerOpts)
+	manager := auth.NewManager(cfg.AuthDir, db, cfg.ProxyURL, cfg.RefreshInterval, selector, cfg.EnableHTTP2, managerOpts)
 	manager.SetRefreshConcurrency(cfg.RefreshConcurrency)
 
 	/* 启动后台任务 */
